@@ -1,7 +1,17 @@
 name: OriginsPlus
-version: '1.0'
+version: 1.0.0
 main: project.kompass.originsPlus.OriginsPlus
 api-version: '1.21'
-authors: [ JustJaimii ]
-description:
-  Makes Illagers fight zombies. For Project: Kompass
+depend:
+  - Origins-Reborn
+softdepend:
+  - PlaceholderAPI
+author: Developer
+description: Bridges Ranboo-like Silk Touch, threattable modifications, and custom projectiles to Origins-Reborn on 1.21.11.
+commands:
+  enderian:
+    description: Toggle Enderian-specific features.
+    aliases: [e]
+    permission: originsplus.command.enderian
+libraries:
+  - org.jetbrains.kotlin:kotlin-stdlib:2.0.21

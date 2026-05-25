@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.4.0-RC"
+    kotlin("jvm") version "2.0.21"
     id("com.gradleup.shadow") version "8.3.0"
     id("xyz.jpenilla.run-paper") version "2.3.1"
 }
@@ -9,14 +9,22 @@ version = "1.0"
 
 repositories {
     mavenCentral()
-    maven("https://repo.papermc.io/repository/maven-public/") {
-        name = "papermc-repo"
+
+    maven {
+        name = "papermc"
+        url = uri("https://repo.papermc.io/repository/maven-public/")
+    }
+
+    maven {
+        name = "placeholderapi"
+        url = uri("https://repo.extendedclip.com/releases/")
     }
 }
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
+    compileOnly("me.clip:placeholderapi:2.12.2")
 }
 
 tasks {

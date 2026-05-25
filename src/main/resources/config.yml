@@ -1,0 +1,5 @@
+# Cooldowns for abilities (in milliseconds)
+cooldowns:
+  shulk-bullet-millis: 5000
+  blaze-fireball-millis: 3000
+  blaze-flight-millis: 5000
