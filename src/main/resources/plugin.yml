@@ -1,0 +1,7 @@
+name: OriginsPlus
+version: '1.0'
+main: project.kompass.originsPlus.OriginsPlus
+api-version: '1.21'
+authors: [ JustJaimii ]
+description:
+  Makes Illagers fight zombies. For Project: Kompass
