@@ -14,9 +14,7 @@ import org.bukkit.event.block.Action
 import org.bukkit.event.player.PlayerInteractEvent
 import org.bukkit.event.player.PlayerMoveEvent
 import org.bukkit.event.player.PlayerQuitEvent
-import org.bukkit.event.player.PlayerToggleFlightEvent
-import org.bukkit.event.player.PlayerJoinEvent
-import org.bukkit.event.player.PlayerRespawnEvent
+import com.destroystokyo.paper.event.player.PlayerJumpEvent
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.potion.PotionEffect
 import org.bukkit.potion.PotionEffectType
@@ -33,12 +31,8 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
 
     private val levitationTasks = HashMap<UUID, BukkitTask>()
     private val particleTasks = HashMap<UUID, BukkitTask>()
-    private val flightCooldownTasks = HashMap<UUID, BukkitTask>() // Tracks live action bar tasks
+    private val flightCooldownTasks = HashMap<UUID, BukkitTask>()
 
-    /**
-     * Helper method to translate legacy formatting codes (like §c, §e, etc.)
-     * and send them directly to the player's action bar.
-     */
     private fun sendActionBar(player: Player, message: String) {
         val component = LegacyComponentSerializer.legacySection().deserialize(message)
         player.sendActionBar(component)
@@ -48,14 +42,11 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     fun onPlayerInteract(event: PlayerInteractEvent) {
         val player = event.player
 
-        // Projectile shooting requires sneaking (Shift)
         if (!player.isSneaking) return
 
-        // Projectile shooting requires holding nothing in the main hand
         val handItem = player.inventory.itemInMainHand
         if (!handItem.type.isAir) return
 
-        // Explicitly check for OFF_HAND. This is vital because LEFT_CLICK_AIR returns a null hand value in Bukkit.
         if (event.hand == EquipmentSlot.OFF_HAND) return
 
         val playerUUID = player.uniqueId
@@ -96,7 +87,7 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     }
 
     @EventHandler
-    fun onPlayerToggleFlight(event: PlayerToggleFlightEvent) {
+    fun onPlayerJump(event: PlayerJumpEvent) {
         val player = event.player
         if (!plugin.hasOrigin(player, "Blazeborn")) return
         if (player.gameMode == GameMode.CREATIVE || player.gameMode == GameMode.SPECTATOR) return
@@ -104,21 +95,10 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         val playerUUID = player.uniqueId
         val currentTime = System.currentTimeMillis()
 
-        // 1. If currently levitating and wanting to stop/glide early
-        if (plugin.activeLevitationPlayers.contains(playerUUID)) {
-            event.isCancelled = true
-            stopLevitationAndStartGlide(player)
-            return
-        }
-
-        // 2. If attempting to start flight (double tapping space)
-        if (event.isFlying) {
-            event.isCancelled = true // Intercept native creative flight trigger
-
-            // Block flight if they are currently gliding/slow falling
+        // Flight activation requires sneaking (Shift + Jump)
+        if (player.isSneaking) {
             if (plugin.slowFallingPlayers.contains(playerUUID)) {
                 player.sendMessage("§cYou cannot fly while slow falling to the ground!")
-                player.isFlying = false
                 return
             }
 
@@ -128,10 +108,10 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
             if (lastUsed != null && currentTime - lastUsed < cooldown) {
                 val secondsLeft = "%.1f".format((cooldown - (currentTime - lastUsed)) / 1000.0)
                 sendActionBar(player, "§cThrusters recharging! ${secondsLeft}s remaining.")
-                player.isFlying = false
                 return
             }
 
+            event.isCancelled = true // Intercept native jump trigger so custom levitation handles upward velocity
             startBlazebornLevitation(player)
         }
     }
@@ -140,22 +120,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     fun onPlayerMove(event: PlayerMoveEvent) {
         val player = event.player
         val uuid = player.uniqueId
-
-        // Self-healing double-jump activation for Blazeborn players
-        if (plugin.hasOrigin(player, "Blazeborn")) {
-            val cooldown = plugin.config.getLong("cooldowns.blaze-flight-millis", 5000)
-            val lastUsed = flightCooldowns[uuid]
-            val onCooldown = lastUsed != null && (System.currentTimeMillis() - lastUsed < cooldown)
-
-            // Continually reinforce allowFlight = true if they are NOT slow falling, NOT levitating, and NOT on cooldown
-            if (!onCooldown && !plugin.slowFallingPlayers.contains(uuid) && !plugin.activeLevitationPlayers.contains(uuid)) {
-                if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                    if (!player.allowFlight) {
-                        player.allowFlight = true
-                    }
-                }
-            }
-        }
 
         // Check if slow falling player has touched solid ground
         if (plugin.slowFallingPlayers.contains(uuid)) {
@@ -174,37 +138,8 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
 
                 val cooldown = plugin.config.getLong("cooldowns.blaze-flight-millis", 5000)
                 startFlightCooldownAnimation(player, startTime, cooldown)
-
-                // Disable double jump capability during active cooldown
-                if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                    player.allowFlight = false
-                    player.isFlying = false
-                }
             }
         }
-    }
-
-    @EventHandler
-    fun onPlayerJoin(event: PlayerJoinEvent) {
-        val player = event.player
-        if (plugin.hasOrigin(player, "Blazeborn")) {
-            if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                player.allowFlight = true
-            }
-        }
-    }
-
-    @EventHandler
-    fun onPlayerRespawn(event: PlayerRespawnEvent) {
-        val player = event.player
-        // Grant permissions 1 tick after respawn since server resets states during respawn cycles
-        Bukkit.getScheduler().runTask(plugin, Runnable {
-            if (player.isOnline && plugin.hasOrigin(player, "Blazeborn")) {
-                if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                    player.allowFlight = true
-                }
-            }
-        })
     }
 
     @EventHandler
@@ -226,17 +161,17 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     }
 
     private fun shootFireballBurst(player: Player) {
-        // Fireball 1 (Immediate)
+        // Fireball 1
         spawnFireball(player)
 
-        // Fireball 2 (4 ticks delay)
+        // Fireball 2
         Bukkit.getScheduler().runTaskLater(plugin, Runnable {
             if (player.isOnline) {
                 spawnFireball(player)
             }
         }, 4L)
 
-        // Fireball 3 (8 ticks delay)
+        // Fireball 3
         Bukkit.getScheduler().runTaskLater(plugin, Runnable {
             if (player.isOnline) {
                 spawnFireball(player)
@@ -267,10 +202,23 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         // Spawn Jetpack particle stream (every 2 ticks)
         val particleTask = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
             if (player.isOnline && plugin.activeLevitationPlayers.contains(uuid)) {
+
+                // SUSTAIN FLIGHT CHECK: Verify if the player is still holding down the Spacebar (Jump key)
+                val holdingJump = try {
+                    player.currentInput.isJump
+                } catch (t: Throwable) {
+                    // Safe fallback if running on an older version of Paper without the modern Input API
+                    true
+                }
+
+                if (!holdingJump) {
+                    stopLevitationAndStartGlide(player)
+                    return@Runnable
+                }
+
                 val loc = player.location
                 val particleLoc = loc.clone().add(0.0, 0.1, 0.0)
 
-                // Spawn dense trails of flame and lava under the player
                 player.world.spawnParticle(Particle.FLAME, particleLoc, 10, 0.15, 0.1, 0.15, 0.02)
                 player.world.spawnParticle(Particle.LAVA, particleLoc, 2, 0.05, 0.0, 0.05, 0.0)
 
@@ -291,20 +239,14 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     private fun stopLevitationAndStartGlide(player: Player) {
         val uuid = player.uniqueId
 
-        // Cancel flight-active scheduling tasks safely
         particleTasks.remove(uuid)?.cancel()
         levitationTasks.remove(uuid)?.cancel()
 
         if (player.isOnline) {
-            // Remove lingering levitation
             player.removePotionEffect(PotionEffectType.LEVITATION)
 
-            if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                player.allowFlight = false
-            }
-
             plugin.activeLevitationPlayers.remove(uuid)
-            plugin.slowFallingPlayers.add(uuid) // Track player slow fall state
+            plugin.slowFallingPlayers.add(uuid)
 
             // Apply virtually infinite Slow Falling (cleaned up as soon as they hit the ground)
             // ambient=false, particles=false, icon=false to hide swirl particles and status icon
@@ -318,12 +260,9 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         }
     }
 
-    /**
-     * Starts a repeating visual task to show the recharge progression of the thrusters.
-     */
     private fun startFlightCooldownAnimation(player: Player, startTime: Long, cooldownDuration: Long) {
         val uuid = player.uniqueId
-        flightCooldownTasks[uuid]?.cancel() // Cancel any redundant running cooldown tasks
+        flightCooldownTasks[uuid]?.cancel()
 
         val task = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
             if (!player.isOnline) {
@@ -336,12 +275,8 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
 
             // If cooldown is fully complete
             if (elapsed >= cooldownDuration) {
-                sendActionBar(player, "§a§l✔ Thrusters Recharged! §r§7(Double-jump to fly)")
+                sendActionBar(player, "§a§l✔ Thrusters Recharged! §r§7(Shift + Jump to fly)")
                 player.world.playSound(player.location, Sound.BLOCK_NOTE_BLOCK_PLING, 0.4f, 2.0f)
-
-                if (player.gameMode != GameMode.CREATIVE && player.gameMode != GameMode.SPECTATOR) {
-                    player.allowFlight = true
-                }
 
                 flightCooldownTasks.remove(uuid)?.cancel()
                 return@Runnable
@@ -357,7 +292,7 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
             val secondsRemaining = "%.1f".format((cooldownDuration - elapsed) / 1000.0)
 
             sendActionBar(player, "§6Thruster Charge: §e[${barRepresentation}§e] §b${secondsRemaining}s")
-        }, 0L, 2L) // Runs every 2 ticks (10 times a second) for optimal visual update rate
+        }, 0L, 2L)
 
         flightCooldownTasks[uuid] = task
     }

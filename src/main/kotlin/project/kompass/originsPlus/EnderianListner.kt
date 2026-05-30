@@ -14,6 +14,11 @@ import org.bukkit.entity.Enderman
 import org.bukkit.entity.EnderPearl
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Player
+import org.bukkit.entity.Blaze
+import org.bukkit.entity.MagmaCube
+import org.bukkit.entity.Piglin
+import org.bukkit.entity.PiglinBrute
+import org.bukkit.entity.Mob
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.event.block.BlockBreakEvent
@@ -25,6 +30,11 @@ import org.bukkit.inventory.ItemStack
 import org.bukkit.persistence.PersistentDataType
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
+import com.destroystokyo.paper.event.entity.EntityAddToWorldEvent
+import com.destroystokyo.paper.entity.ai.Goal
+import com.destroystokyo.paper.entity.ai.GoalKey
+import com.destroystokyo.paper.entity.ai.GoalType
+import java.util.EnumSet
 
 class EnderianListener(private val plugin: OriginsPlus) : Listener {
 
@@ -111,13 +121,40 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
     }
 
     @EventHandler
-    fun onEndermanTarget(event: EntityTargetLivingEntityEvent) {
-        if (event.entity !is Enderman) return
-        val player = event.target as? Player ?: return
+    fun onEntityTarget(event: EntityTargetLivingEntityEvent) {
+        val target = event.target as? Player ?: return
+        val entity = event.entity
 
-        // Endermen will ignore players with either Enderian or Shulk origins
-        if (plugin.hasOrigin(player, "Enderian") || plugin.hasOrigin(player, "Shulk")) {
-            event.isCancelled = true
+        if (entity is Enderman) {
+            // Endermen will ignore players with either Enderian or Shulk origins
+            if (plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")) {
+                event.isCancelled = true
+            }
+        } else if (entity is Blaze || entity is MagmaCube) {
+            // Blazes and Magma Cubes should not attack Blazeborns
+            if (plugin.hasOrigin(target, "Blazeborn")) {
+                event.isCancelled = true
+            }
+        } else if (entity is Piglin || entity is PiglinBrute) {
+            // Piglins and Piglin Brutes should not attack Blazeborns (they flee instead)
+            if (plugin.hasOrigin(target, "Blazeborn")) {
+                event.isCancelled = true
+            }
+        }
+    }
+
+    @EventHandler
+    fun onEntityAddToWorld(event: EntityAddToWorldEvent) {
+        val entity = event.entity
+        if (entity is Piglin || entity is PiglinBrute) {
+            val mob = entity as Mob
+            val mobGoals = Bukkit.getMobGoals()
+            val goalKey = GoalKey.of(Mob::class.java, NamespacedKey(plugin, "run_away_from_blazeborn"))
+
+            // Only add the fleeing goal if they don't already have it
+            if (!mobGoals.hasGoal(mob, goalKey)) {
+                mobGoals.addGoal(mob, 1, RunAwayFromBlazebornGoal(mob, plugin))
+            }
         }
     }
 
@@ -144,9 +181,9 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
             if (cause == EntityDamageEvent.DamageCause.CUSTOM ||
                 cause == EntityDamageEvent.DamageCause.DROWNING ||
                 cause == EntityDamageEvent.DamageCause.MELTING ||
-                cause == EntityDamageEvent.DamageCause.FREEZE) { // Added FREEZE to support Origins-Reborn custom rain mapping
+                cause == EntityDamageEvent.DamageCause.FREEZE) { // Support Origins-Reborn custom rain mapping
 
-                if (hasHelmet(player) && player.isInRain && !player.isInWater && !isStandingInWater(player)) {
+                if (hasHelmet(player) && isInRain(player) && !player.isInWater && !isStandingInWater(player)) {
                     event.isCancelled = true
                     return
                 }
@@ -243,8 +280,17 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
 
         if (world.hasStorm()) return false
 
+        // If the player is in a vehicle, check if the vehicle is exposed to the sun
+        val vehicle = player.vehicle
+        if (vehicle != null) {
+            val vehicleLoc = vehicle.location
+            if (vehicleLoc.block.lightFromSky >= 15 || world.getHighestBlockYAt(vehicleLoc) <= vehicleLoc.blockY) {
+                return true
+            }
+        }
+
         // lightFromSky represents exposure to the sky (sunlight is 15 in open air)
-        return player.eyeLocation.block.lightFromSky >= 15
+        return player.eyeLocation.block.lightFromSky >= 15 || world.getHighestBlockYAt(player.location) <= player.location.blockY
     }
 
     private fun isNearFireOrLava(player: Player): Boolean {
@@ -262,4 +308,81 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
                 fireTypes.contains(headBlock.type) ||
                 fireTypes.contains(legBlock.type)
     }
+
+    private fun isInRain(player: Player): Boolean {
+        if (player.isInRain) return true
+
+        // If the player is riding a boat, check if the boat is exposed to rain
+        val vehicle = player.vehicle
+        if (vehicle != null && vehicle.isInRain) return true
+
+        val world = player.world
+        if (!world.hasStorm()) return false
+
+        return player.eyeLocation.block.lightFromSky >= 15 || world.getHighestBlockYAt(player.location) <= player.location.blockY
+    }
+}
+
+/**
+ * Custom Paper Pathfinder Goal to make Piglins & Brutes flee from Blazeborns.
+ */
+private class RunAwayFromBlazebornGoal(private val mob: Mob, private val plugin: OriginsPlus) : Goal<Mob> {
+
+    private var targetPlayer: Player? = null
+    private val key = GoalKey.of(Mob::class.java, NamespacedKey(plugin, "run_away_from_blazeborn"))
+
+    override fun shouldActivate(): Boolean {
+        // Look for Blazeborn players in a 16-block radius
+        val nearbyBlazeborns = mob.getNearbyEntities(16.0, 16.0, 16.0)
+            .filterIsInstance<Player>()
+            .filter {
+                plugin.hasOrigin(it, "Blazeborn") &&
+                        it.gameMode != GameMode.CREATIVE &&
+                        it.gameMode != GameMode.SPECTATOR &&
+                        !it.isDead
+            }
+
+        if (nearbyBlazeborns.isEmpty()) return false
+
+        // Target the nearest Blazeborn player
+        targetPlayer = nearbyBlazeborns.minByOrNull { mob.location.distanceSquared(it.location) }
+        return targetPlayer != null
+    }
+
+    override fun shouldStayActive(): Boolean {
+        val player = targetPlayer ?: return false
+        if (!player.isOnline || player.isDead || player.gameMode == GameMode.CREATIVE || player.gameMode == GameMode.SPECTATOR) return false
+        if (!plugin.hasOrigin(player, "Blazeborn")) return false
+
+        return mob.location.distanceSquared(player.location) < 256.0
+    }
+
+    override fun start() {
+        val currentTarget = mob.target as? Player
+        if (currentTarget != null && plugin.hasOrigin(currentTarget, "Blazeborn")) {
+            mob.target = null
+        }
+    }
+    override fun stop() {
+        targetPlayer = null
+        mob.pathfinder.stopPathfinding()
+    }
+
+    override fun tick() {
+        val player = targetPlayer ?: return
+
+        val awayVector = mob.location.toVector().subtract(player.location.toVector())
+        if (awayVector.lengthSquared() == 0.0) {
+            awayVector.setX(1.0)
+        }
+        awayVector.normalize().multiply(8.0)
+
+        val targetLoc = mob.location.clone().add(awayVector)
+
+        mob.pathfinder.moveTo(targetLoc, 1.3)
+    }
+
+    override fun getKey(): GoalKey<Mob> = key
+
+    override fun getTypes(): EnumSet<GoalType> = EnumSet.of(GoalType.MOVE, GoalType.LOOK)
 }
