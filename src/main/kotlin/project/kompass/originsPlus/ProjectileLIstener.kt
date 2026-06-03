@@ -2,6 +2,7 @@ package project.kompass.originsPlus.listener
 
 import org.bukkit.Bukkit
 import org.bukkit.GameMode
+import org.bukkit.Material
 import org.bukkit.Particle
 import org.bukkit.Sound
 import org.bukkit.entity.LivingEntity
@@ -57,8 +58,8 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
 
             // Shulk Ability (Shulker Bullet)
             if (plugin.hasOrigin(player, "Shulk")) {
+                if (isOnCooldown(player, projectileCooldowns, currentTime)) return
                 val cooldown = plugin.config.getLong("cooldowns.shulk-bullet-millis", 5000)
-                if (isOnCooldown(player, projectileCooldowns, cooldown, currentTime)) return
 
                 val bullet = player.launchProjectile(ShulkerBullet::class.java)
                 bullet.shooter = player
@@ -69,18 +70,21 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
                 }
 
                 player.world.playSound(player.location, Sound.ENTITY_SHULKER_SHOOT, 1.0f, 1.0f)
-                projectileCooldowns[playerUUID] = currentTime
+                projectileCooldowns[playerUUID] = currentTime + cooldown
                 event.isCancelled = true
             }
 
             // Blazeborn Ability (Successive Burst of 3 Fireballs)
             else if (plugin.hasOrigin(player, "Blazeborn")) {
-                val cooldown = plugin.config.getLong("cooldowns.blaze-fireball-millis", 3000)
-                if (isOnCooldown(player, projectileCooldowns, cooldown, currentTime)) return
+                if (isOnCooldown(player, projectileCooldowns, currentTime)) return
+
+                // Set cooldown to 10 seconds if the player is in rain or snow
+                val isRaining = isInRain(player)
+                val cooldown = if (isRaining) 10000L else plugin.config.getLong("cooldowns.blaze-fireball-millis", 3000)
 
                 shootFireballBurst(player)
 
-                projectileCooldowns[playerUUID] = currentTime
+                projectileCooldowns[playerUUID] = currentTime + cooldown
                 event.isCancelled = true
             }
         }
@@ -102,11 +106,10 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
                 return
             }
 
-            // Check flight cooldown
-            val cooldown = plugin.config.getLong("cooldowns.blaze-flight-millis", 5000)
-            val lastUsed = flightCooldowns[playerUUID]
-            if (lastUsed != null && currentTime - lastUsed < cooldown) {
-                val secondsLeft = "%.1f".format((cooldown - (currentTime - lastUsed)) / 1000.0)
+            // Check flight cooldown using the expiration timestamp
+            val expireTime = flightCooldowns[playerUUID]
+            if (expireTime != null && currentTime < expireTime) {
+                val secondsLeft = "%.1f".format((expireTime - currentTime) / 1000.0)
                 sendActionBar(player, "§cThrusters recharging! ${secondsLeft}s remaining.")
                 return
             }
@@ -134,9 +137,13 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
 
                 // Flight cooldown begins ONLY now that the player has touched the ground
                 val startTime = System.currentTimeMillis()
-                flightCooldowns[uuid] = startTime
 
-                val cooldown = plugin.config.getLong("cooldowns.blaze-flight-millis", 5000)
+                // Set flight cooldown to 25 seconds if landing in rain or snow
+                val isRaining = isInRain(player)
+                val cooldown = if (isRaining) 25000L else plugin.config.getLong("cooldowns.blaze-flight-millis", 5000)
+
+                flightCooldowns[uuid] = startTime + cooldown
+
                 startFlightCooldownAnimation(player, startTime, cooldown)
             }
         }
@@ -146,7 +153,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
     fun onPlayerQuit(event: PlayerQuitEvent) {
         val uuid = event.player.uniqueId
 
-        // Safety cleanup to prevent memory leaks and lingering attributes
         plugin.activeLevitationPlayers.remove(uuid)
         particleTasks.remove(uuid)?.cancel()
         levitationTasks.remove(uuid)?.cancel()
@@ -155,8 +161,8 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         if (plugin.slowFallingPlayers.contains(uuid)) {
             plugin.slowFallingPlayers.remove(uuid)
             event.player.removePotionEffect(PotionEffectType.SLOW_FALLING)
-            // Put on immediate fallback cooldown to prevent bypass on rejoin
-            flightCooldowns[uuid] = System.currentTimeMillis()
+            // Put on immediate 5s fallback cooldown to prevent bypass on rejoin
+            flightCooldowns[uuid] = System.currentTimeMillis() + 5000
         }
     }
 
@@ -194,20 +200,15 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         player.sendMessage("§6Flame-thrusters active! Launching upward.")
         player.world.playSound(player.location, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 1.0f, 1.0f)
 
-        // Apply a strong Levitation effect (Amplifier 6 is a rapid upward thrust)
-        // Duration: 3 seconds (60 ticks). ambient=false, particles=false, icon=false to hide effects
         val levitationEffect = PotionEffect(PotionEffectType.LEVITATION, 60, 6, false, false, false)
         player.addPotionEffect(levitationEffect)
 
-        // Spawn Jetpack particle stream (every 2 ticks)
         val particleTask = Bukkit.getScheduler().runTaskTimer(plugin, Runnable {
             if (player.isOnline && plugin.activeLevitationPlayers.contains(uuid)) {
 
-                // SUSTAIN FLIGHT CHECK: Verify if the player is still holding down the Spacebar (Jump key)
                 val holdingJump = try {
                     player.currentInput.isJump
                 } catch (t: Throwable) {
-                    // Safe fallback if running on an older version of Paper without the modern Input API
                     true
                 }
 
@@ -229,7 +230,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         }, 0L, 2L)
         particleTasks[uuid] = particleTask
 
-        // Stop flight task after 3 seconds (60 ticks)
         val levTask = Bukkit.getScheduler().runTaskLater(plugin, Runnable {
             stopLevitationAndStartGlide(player)
         }, 60L)
@@ -248,8 +248,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
             plugin.activeLevitationPlayers.remove(uuid)
             plugin.slowFallingPlayers.add(uuid)
 
-            // Apply virtually infinite Slow Falling (cleaned up as soon as they hit the ground)
-            // ambient=false, particles=false, icon=false to hide swirl particles and status icon
             val slowFallEffect = PotionEffect(PotionEffectType.SLOW_FALLING, 72000, 0, false, false, false)
             player.addPotionEffect(slowFallEffect)
 
@@ -273,7 +271,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
             val currentTime = System.currentTimeMillis()
             val elapsed = currentTime - startTime
 
-            // If cooldown is fully complete
             if (elapsed >= cooldownDuration) {
                 sendActionBar(player, "§a§l✔ Thrusters Recharged! §r§7(Shift + Jump to fly)")
                 player.world.playSound(player.location, Sound.BLOCK_NOTE_BLOCK_PLING, 0.4f, 2.0f)
@@ -282,7 +279,6 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
                 return@Runnable
             }
 
-            // Design progress bar: Total of 10 blocks
             val totalBars = 10
             val progressRatio = (elapsed.toDouble() / cooldownDuration).coerceIn(0.0, 1.0)
             val filledBars = (progressRatio * totalBars).toInt()
@@ -297,16 +293,13 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
         flightCooldownTasks[uuid] = task
     }
 
-    // Used exclusively for projectiles (Shulk / Blazeborn fireballs).
-    private fun isOnCooldown(player: Player, cooldownMap: HashMap<UUID, Long>, cooldown: Long, currentTime: Long): Boolean {
+    private fun isOnCooldown(player: Player, cooldownMap: HashMap<UUID, Long>, currentTime: Long): Boolean {
         val uuid = player.uniqueId
-        val lastUsed = cooldownMap[uuid]
-        if (lastUsed != null) {
-            if (currentTime - lastUsed < cooldown) {
-                val secondsLeft = ((cooldown - (currentTime - lastUsed)) / 1000) + 1
-                player.sendMessage("§cAbility on cooldown! ${secondsLeft}s remaining.") // Kept in normal chat
-                return true
-            }
+        val expireTime = cooldownMap[uuid]
+        if (expireTime != null && currentTime < expireTime) {
+            val secondsLeft = ((expireTime - currentTime) / 1000) + 1
+            player.sendMessage("§cAbility on cooldown! ${secondsLeft}s remaining.")
+            return true
         }
         return false
     }
@@ -332,5 +325,43 @@ class ProjectileListener(private val plugin: OriginsPlus) : Listener {
             }
         }
         return closestTarget
+    }
+
+    private fun isInRain(player: Player): Boolean {
+        if (player.isInRain) return true
+
+        val vehicle = player.vehicle
+        if (vehicle != null && vehicle.isInRain) return true
+
+        val world = player.world
+        if (!world.hasStorm()) return false
+
+        return isExposedToRain(player)
+    }
+
+    private fun isExposedToRain(player: Player): Boolean {
+        val loc = player.eyeLocation
+        val world = loc.world ?: return false
+        val x = loc.blockX
+        val z = loc.blockZ
+        val highestBlock = world.getHighestBlockAt(x, z)
+
+        val startY = loc.blockY + 1
+        if (highestBlock.y < startY) {
+            return true
+        }
+
+        for (y in startY..highestBlock.y) {
+            val block = world.getBlockAt(x, y, z)
+            val type = block.type
+            if (type == Material.AIR || type == Material.CAVE_AIR || type == Material.VOID_AIR ||
+                type == Material.WATER || type == Material.BUBBLE_COLUMN) {
+                continue
+            }
+            if (type.isSolid) {
+                return false
+            }
+        }
+        return true
     }
 }
