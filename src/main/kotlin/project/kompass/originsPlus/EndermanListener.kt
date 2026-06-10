@@ -6,12 +6,15 @@ import org.bukkit.GameMode
 import org.bukkit.attribute.Attribute
 import org.bukkit.entity.Enderman
 import org.bukkit.entity.Player
+import org.bukkit.entity.Mob
 import org.bukkit.entity.memory.MemoryKey
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent
 import org.bukkit.event.entity.EntityDamageByEntityEvent
 import org.bukkit.event.EventPriority
+import com.destroystokyo.paper.event.entity.EntityAddToWorldEvent
+import com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent
 import com.destroystokyo.paper.event.entity.EndermanAttackPlayerEvent
 import com.destroystokyo.paper.event.entity.EntityPathfindEvent
 import com.google.common.cache.Cache
@@ -19,21 +22,22 @@ import com.google.common.cache.CacheBuilder
 import java.lang.reflect.Method
 import java.util.concurrent.TimeUnit
 import java.util.UUID
+import java.util.HashSet
 
 class EndermanListener(private val plugin: OriginsPlus) : Listener {
 
-    // High-performance cache that automatically purges entries 30 seconds after provocation,
-    // fully replacing the deprecated Metadata API and guaranteeing zero memory leaks.
     private val provokedEndermen: Cache<UUID, UUID> = CacheBuilder.newBuilder()
         .expireAfterWrite(30, TimeUnit.SECONDS)
         .build()
 
+    // Tracking set to ensure reflection is only executed once per Enderman lifecycle,
+    // completely eliminating any repeating CPU or memory overhead.
+    private val processedEndermen = HashSet<UUID>()
+
     // Cached reflection fields to eliminate runtime method lookup overhead entirely
     private var sentientMobsPlugin: org.bukkit.plugin.Plugin? = null
     private var getAiManagerMethod: Method? = null
-    private var getStateMachineMethod: Method? = null
-    private var getContextMethod: Method? = null
-    private var setTargetMethod: Method? = null
+    private var unregisterEntityMethod: Method? = null
     private var reflectionInitialized = false
 
     init {
@@ -46,52 +50,22 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
                 if (endermen.isEmpty()) continue
 
                 for (enderman in endermen) {
+                    // Only unregister if we haven't already processed this entity
+                    if (!processedEndermen.contains(enderman.uniqueId)) {
+                        unregisterFromSentientMobs(enderman)
+                        processedEndermen.add(enderman.uniqueId)
+                    }
+
                     // Fast field-lookup check. Instantly skip the 99% of Endermen not targeting a player.
-                    val target = enderman.target as? Player
+                    val target = enderman.target as? Player ?: continue
+                    if (target.gameMode != GameMode.SURVIVAL && target.gameMode != GameMode.ADVENTURE) continue
 
-                    if (target != null) {
-                        if (target.gameMode != GameMode.SURVIVAL && target.gameMode != GameMode.ADVENTURE) continue
+                    val distanceSq = enderman.location.distanceSquared(target.location)
+                    val isProtected = plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")
 
-                        val distanceSq = enderman.location.distanceSquared(target.location)
-                        val isProtected = plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")
-
-                        if (isProtected) {
-                            resetAggression(enderman)
-                        } else {
-                            val provokedByUuid = provokedEndermen.getIfPresent(enderman.uniqueId)
-                            val isProvoked = provokedByUuid == target.uniqueId
-
-                            if (!isProvoked) {
-                                resetAggression(enderman)
-                            }
-                        }
-                    } else {
-                        // Scan the Brain-level ANGRY_AT memory to catch direct NMS target-injection bypasses
-                        try {
-                            val angryAtUuid = enderman.getMemory(MemoryKey.ANGRY_AT)
-                            if (angryAtUuid != null) {
-                                val angryAtPlayer = Bukkit.getPlayer(angryAtUuid)
-                                if (angryAtPlayer != null && (angryAtPlayer.gameMode == GameMode.SURVIVAL || angryAtPlayer.gameMode == GameMode.ADVENTURE)) {
-                                    val isProtected = plugin.hasOrigin(angryAtPlayer, "Enderian") || plugin.hasOrigin(angryAtPlayer, "Shulk")
-                                    if (isProtected) {
-                                        resetAggression(enderman)
-                                    } else {
-                                        val provokedByUuid = provokedEndermen.getIfPresent(enderman.uniqueId)
-                                        val isProvoked = provokedByUuid == angryAtPlayer.uniqueId
-
-                                        if (!isProvoked) {
-                                            resetAggression(enderman)
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (ignored: Exception) {}
-
-                        // Clean up visual metadata states once the combat sequence is fully terminated
-                        if (enderman.isScreaming || enderman.hasBeenStaredAt()) {
-                            enderman.setScreaming(false)
-                            enderman.setHasBeenStaredAt(false)
-                        }
+                    if (isProtected) {
+                        // Rule 1: Protected player is ALWAYS immunised against target and visual state changes
+                        resetAggression(enderman)
                     }
                 }
             }
@@ -111,13 +85,8 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
                 getAiManagerMethod = sm.javaClass.getMethod("getAiManager")
 
                 val aiManagerClass = getAiManagerMethod?.returnType
-                getStateMachineMethod = aiManagerClass?.getMethod("getStateMachine", UUID::class.java)
-
-                val stateMachineClass = getStateMachineMethod?.returnType
-                getContextMethod = stateMachineClass?.getMethod("getContext")
-
-                val contextClass = getContextMethod?.returnType
-                setTargetMethod = contextClass?.getMethod("setTarget", org.bukkit.entity.LivingEntity::class.java)
+                // Corrected: Specifically look up "unregisterEntity" instead of "getStateMachine"
+                unregisterEntityMethod = aiManagerClass?.getMethod("unregisterEntity", UUID::class.java)
             }
         } catch (ignored: Exception) {}
         reflectionInitialized = true
@@ -137,9 +106,6 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
             enderman.setMemory(MemoryKey.ANGRY_AT, null)
         } catch (ignored: Exception) {}
 
-        // Layer 3: Wipes target from SentientMobs' internal AI Behavior State Machine Context
-        clearSentientMobsTarget(enderman)
-
         enderman.pathfinder.stopPathfinding()
     }
 
@@ -147,24 +113,37 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
      * Intercepts SentientMobs' custom API at runtime using cached reflection,
      * forcing its custom targeting state machines to cleanly stand down.
      */
-    private fun clearSentientMobsTarget(enderman: Enderman) {
+    private fun unregisterFromSentientMobs(enderman: Enderman) {
         initReflection()
         val sm = sentientMobsPlugin ?: return
         val getAiManager = getAiManagerMethod ?: return
-        val getStateMachine = getStateMachineMethod ?: return
-        val getContext = getContextMethod ?: return
-        val setTarget = setTargetMethod ?: return
+        val unregisterEntity = unregisterEntityMethod ?: return
 
         try {
             val aiManager = getAiManager.invoke(sm)
-            val stateMachine = getStateMachine.invoke(aiManager, enderman.uniqueId)
-            if (stateMachine != null) {
-                val context = getContext.invoke(stateMachine)
-                if (context != null) {
-                    setTarget.invoke(context, null)
-                }
-            }
+            // Corrected: Invokes the actual unregisterEntity method handle
+            unregisterEntity.invoke(aiManager, enderman.uniqueId)
         } catch (ignored: Exception) {}
+    }
+
+    @EventHandler
+    fun onEntityAddToWorld(event: EntityAddToWorldEvent) {
+        val entity = event.entity
+        if (entity is Enderman) {
+            if (!processedEndermen.contains(entity.uniqueId)) {
+                unregisterFromSentientMobs(entity)
+                processedEndermen.add(entity.uniqueId)
+            }
+        }
+    }
+
+    @EventHandler
+    fun onEntityRemoveFromWorld(event: EntityRemoveFromWorldEvent) {
+        val entity = event.entity
+        if (entity is Enderman) {
+            // Prevents any memory leak of cached UUIDs when Endermen unload or die
+            processedEndermen.remove(entity.uniqueId)
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -172,19 +151,9 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
         val target = event.target as? Player ?: return
         val entity = event.entity as? Enderman ?: return
 
-        val isProtected = plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")
-        if (isProtected) {
+        if (plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")) {
             event.isCancelled = true
             resetAggression(entity)
-        } else {
-            // Normal players: verify if they actually provoked this Enderman
-            val provokedByUuid = provokedEndermen.getIfPresent(entity.uniqueId)
-            val isProvoked = provokedByUuid == target.uniqueId
-
-            if (!isProvoked) {
-                event.isCancelled = true
-                resetAggression(entity)
-            }
         }
     }
 
@@ -195,9 +164,6 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
         if (plugin.hasOrigin(player, "Enderian") || plugin.hasOrigin(player, "Shulk")) {
             event.isCancelled = true
             resetAggression(enderman)
-        } else {
-            // Normal player is staring; tag the Enderman as legitimately provoked by this player
-            provokedEndermen.put(enderman.uniqueId, player.uniqueId)
         }
     }
 
@@ -208,24 +174,14 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
         // 1. Direct entity targeting pathfind check
         val targetEntity = event.targetEntity as? Player
         if (targetEntity != null) {
-            val isProtected = plugin.hasOrigin(targetEntity, "Enderian") || plugin.hasOrigin(targetEntity, "Shulk")
-            if (isProtected) {
+            if (plugin.hasOrigin(targetEntity, "Enderian") || plugin.hasOrigin(targetEntity, "Shulk")) {
                 event.isCancelled = true
                 resetAggression(entity)
                 return
-            } else {
-                val provokedByUuid = provokedEndermen.getIfPresent(entity.uniqueId)
-                val isProvoked = provokedByUuid == targetEntity.uniqueId
-
-                if (!isProvoked) {
-                    event.isCancelled = true
-                    resetAggression(entity)
-                    return
-                }
             }
         }
 
-        // 2. Location-based coordinate pathfind check (destinations near players)
+        // 2. Location-based coordinate pathfind check (destinations near protected players)
         val destination = event.loc
         val range = entity.getAttribute(Attribute.FOLLOW_RANGE)?.value ?: 64.0
         val rangeSq = range * range
@@ -236,26 +192,12 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
 
             val loc = player.location
             if (entity.location.distanceSquared(loc) <= rangeSq) {
-                val isProtected = plugin.hasOrigin(player, "Enderian") || plugin.hasOrigin(player, "Shulk")
-
-                if (isProtected) {
+                if (plugin.hasOrigin(player, "Enderian") || plugin.hasOrigin(player, "Shulk")) {
                     // Cancel pathfinding if coordinates are within 16 blocks of protected players
                     if (destination.distanceSquared(loc) < 256.0) {
                         event.isCancelled = true
                         resetAggression(entity)
                         return
-                    }
-                } else {
-                    // Normal players: cancel pathing if they didn't provoke the Enderman
-                    val provokedByUuid = provokedEndermen.getIfPresent(entity.uniqueId)
-                    val isProvoked = provokedByUuid == player.uniqueId
-
-                    if (!isProvoked) {
-                        if (destination.distanceSquared(loc) < 256.0) {
-                            event.isCancelled = true
-                            resetAggression(entity)
-                            return
-                        }
                     }
                 }
             }
@@ -267,35 +209,22 @@ class EndermanListener(private val plugin: OriginsPlus) : Listener {
         val damager = event.damager
         val entity = event.entity
 
-        // Case 1: Enderman attempting to damage a Player
+        // Case 1: Enderman attempting to damage a protected Player
         if (damager is Enderman && entity is Player) {
-            val isProtected = plugin.hasOrigin(entity, "Enderian") || plugin.hasOrigin(entity, "Shulk")
-            if (isProtected) {
+            if (plugin.hasOrigin(entity, "Enderian") || plugin.hasOrigin(entity, "Shulk")) {
                 event.isCancelled = true
                 resetAggression(damager)
-            } else {
-                // Normal player: block damage if they never provoked the Enderman
-                val provokedByUuid = provokedEndermen.getIfPresent(damager.uniqueId)
-                val isProvoked = provokedByUuid == entity.uniqueId
-
-                if (!isProvoked) {
-                    event.isCancelled = true
-                    resetAggression(damager)
-                }
             }
         }
-        // Case 2: Player damaging an Enderman
+        // Case 2: Protected Player damaging an Enderman
         else if (damager is Player && entity is Enderman) {
             if (plugin.hasOrigin(damager, "Enderian") || plugin.hasOrigin(damager, "Shulk")) {
-                // If protected player hits it, reset aggression immediately and don't tag as provoked
+                // If protected player hits it, reset aggression immediately
                 Bukkit.getScheduler().runTask(plugin, Runnable {
                     if (entity.isValid) {
                         resetAggression(entity)
                     }
                 })
-            } else {
-                // Normal player hits it; tag the Enderman as legitimately provoked by this player
-                provokedEndermen.put(entity.uniqueId, damager.uniqueId)
             }
         }
     }
