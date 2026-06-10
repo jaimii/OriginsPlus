@@ -8,6 +8,7 @@ import org.bukkit.plugin.java.JavaPlugin
 import org.bukkit.potion.PotionEffectType
 import project.kompass.originsPlus.command.EnderianCommand
 import project.kompass.originsPlus.listener.EnderianListener
+import project.kompass.originsPlus.listener.EndermanListener
 import project.kompass.originsPlus.listener.ProjectileListener
 import java.io.File
 import java.util.HashSet
@@ -36,8 +37,9 @@ class OriginsPlus : JavaPlugin() {
             logger.warning("PlaceholderAPI not found. Falling back to permission-based origin detection.")
         }
 
-        // Register event handlers
+        // Register event handlers (Ensure EndermanListener is present)
         server.pluginManager.registerEvents(EnderianListener(this), this)
+        server.pluginManager.registerEvents(EndermanListener(this), this)
         server.pluginManager.registerEvents(ProjectileListener(this), this)
 
         // Register commands

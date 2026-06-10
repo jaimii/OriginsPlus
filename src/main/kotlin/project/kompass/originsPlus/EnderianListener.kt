@@ -10,8 +10,6 @@ import org.bukkit.Particle
 import org.bukkit.Sound
 import org.bukkit.block.CreatureSpawner
 import org.bukkit.block.data.Waterlogged
-import org.bukkit.attribute.Attribute
-import org.bukkit.entity.Enderman
 import org.bukkit.entity.EnderPearl
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Player
@@ -24,18 +22,15 @@ import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockPlaceEvent
-import org.bukkit.event.entity.EntityTargetLivingEntityEvent
 import org.bukkit.event.entity.ProjectileLaunchEvent
 import org.bukkit.event.entity.EntityDamageEvent
-import org.bukkit.event.entity.EntityDamageByEntityEvent
+import org.bukkit.event.entity.EntityTargetLivingEntityEvent
 import org.bukkit.event.EventPriority
 import org.bukkit.inventory.ItemStack
 import org.bukkit.persistence.PersistentDataType
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
 import com.destroystokyo.paper.event.entity.EntityAddToWorldEvent
-import com.destroystokyo.paper.event.entity.EndermanAttackPlayerEvent
-import com.destroystokyo.paper.event.entity.EntityPathfindEvent
 import com.destroystokyo.paper.entity.ai.Goal
 import com.destroystokyo.paper.entity.ai.GoalKey
 import com.destroystokyo.paper.entity.ai.GoalType
@@ -47,7 +42,7 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
 
     @EventHandler
     fun onBlockBreak(event: BlockBreakEvent) {
-        val player = event.player
+        val player = event.player ?: return
         if (!plugin.hasOrigin(player, "Enderian")) return
         if (player.gameMode == GameMode.CREATIVE) return
 
@@ -121,106 +116,11 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
         val target = event.target as? Player ?: return
         val entity = event.entity as? Mob ?: return
 
-        if (entity is Enderman) {
-            if (plugin.hasOrigin(target, "Enderian") || plugin.hasOrigin(target, "Shulk")) {
-                event.isCancelled = true
-                entity.target = null
-                entity.setScreaming(false)
-                entity.setHasBeenStaredAt(false)
-            }
-        } else if (entity is Blaze || entity is MagmaCube) {
+        // Manages Blazeborn passivity to Blazes, Magma Cubes, Piglins, and Piglin Brutes
+        if (entity is Blaze || entity is MagmaCube || entity is Piglin || entity is PiglinBrute) {
             if (plugin.hasOrigin(target, "Blazeborn")) {
                 event.isCancelled = true
                 entity.target = null
-            }
-        } else if (entity is Piglin || entity is PiglinBrute) {
-            if (plugin.hasOrigin(target, "Blazeborn")) {
-                event.isCancelled = true
-                entity.target = null
-            }
-        }
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST)
-    fun onEndermanAttackPlayer(event: EndermanAttackPlayerEvent) {
-        val player = event.player
-        val enderman = event.entity
-        if (plugin.hasOrigin(player, "Enderian") || plugin.hasOrigin(player, "Shulk")) {
-            event.isCancelled = true
-            enderman.target = null
-            enderman.setScreaming(false)
-            enderman.setHasBeenStaredAt(false)
-            enderman.pathfinder.stopPathfinding()
-        }
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST)
-    fun onEntityPathfind(event: EntityPathfindEvent) {
-        val entity = event.entity as? Enderman ?: return
-
-        // 1. Direct entity targeting pathfind check
-        val targetEntity = event.targetEntity as? Player
-        if (targetEntity != null && (plugin.hasOrigin(targetEntity, "Enderian") || plugin.hasOrigin(targetEntity, "Shulk"))) {
-            event.isCancelled = true
-            entity.target = null
-            entity.setScreaming(false)
-            entity.setHasBeenStaredAt(false)
-            entity.pathfinder.stopPathfinding()
-            return
-        }
-
-        // 2. Location-based coordinate pathfind check (destinations near protected players)
-        val destination = event.loc
-        val range = entity.getAttribute(Attribute.FOLLOW_RANGE)?.value ?: 64.0
-        val rangeSq = range * range
-
-        // Evaluates players directly from the world list instead of querying loaded chunks
-        val worldPlayers = entity.world.players
-        for (player in worldPlayers) {
-            if (player.gameMode != GameMode.SURVIVAL && player.gameMode != GameMode.ADVENTURE) continue
-            if (!plugin.hasOrigin(player, "Enderian") && !plugin.hasOrigin(player, "Shulk")) continue
-
-            val loc = player.location
-            if (entity.location.distanceSquared(loc) <= rangeSq) {
-                // Cancel if path destination falls within 3 blocks (9.0 squared) of a player
-                if (destination.distanceSquared(loc) < 9.0) {
-                    event.isCancelled = true
-                    entity.target = null
-                    entity.setScreaming(false)
-                    entity.setHasBeenStaredAt(false)
-                    entity.pathfinder.stopPathfinding()
-                    return
-                }
-            }
-        }
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST)
-    fun onEntityDamageByEntity(event: EntityDamageByEntityEvent) {
-        val damager = event.damager
-        val entity = event.entity
-
-        // Case 1: Enderman attempting to damage an Enderian/Shulk Player
-        if (damager is Enderman && entity is Player) {
-            if (plugin.hasOrigin(entity, "Enderian") || plugin.hasOrigin(entity, "Shulk")) {
-                event.isCancelled = true
-                damager.target = null
-                damager.setScreaming(false)
-                damager.setHasBeenStaredAt(false)
-                damager.pathfinder.stopPathfinding()
-            }
-        }
-        // Case 2: Enderian/Shulk Player damaging an Enderman (suppresses retaliatory anger)
-        else if (damager is Player && entity is Enderman) {
-            if (plugin.hasOrigin(damager, "Enderian") || plugin.hasOrigin(damager, "Shulk")) {
-                Bukkit.getScheduler().runTask(plugin, Runnable {
-                    if (entity.isValid) {
-                        entity.target = null
-                        entity.setScreaming(false)
-                        entity.setHasBeenStaredAt(false)
-                        entity.pathfinder.stopPathfinding()
-                    }
-                })
             }
         }
     }
@@ -235,17 +135,6 @@ class EnderianListener(private val plugin: OriginsPlus) : Listener {
 
             if (!mobGoals.hasGoal(mob, goalKey)) {
                 mobGoals.addGoal(mob, 1, RunAwayFromBlazebornGoal(mob, plugin))
-            }
-        } else if (entity is Enderman) {
-            val mobGoals = Bukkit.getMobGoals()
-            val targetKey = GoalKey.of(Enderman::class.java, NamespacedKey(plugin, "prevent_enderian_target"))
-            val proximityKey = GoalKey.of(Enderman::class.java, NamespacedKey(plugin, "prevent_enderian_proximity"))
-
-            if (!mobGoals.hasGoal(entity, targetKey)) {
-                mobGoals.addGoal(entity, 0, PreventEnderianTargetGoal(entity, plugin))
-            }
-            if (!mobGoals.hasGoal(entity, proximityKey)) {
-                mobGoals.addGoal(entity, 0, PreventEnderianProximityGoal(entity, plugin))
             }
         }
     }
@@ -473,7 +362,6 @@ private class RunAwayFromBlazebornGoal(private val mob: Mob, private val plugin:
 
         val closestPlayer = worldPlayers.minByOrNull { mob.location.distanceSquared(it.location) } ?: return false
 
-        // Limits checks to 16 blocks (256.0 squared)
         if (mob.location.distanceSquared(closestPlayer.location) > 256.0) return false
 
         targetPlayer = closestPlayer
@@ -514,100 +402,6 @@ private class RunAwayFromBlazebornGoal(private val mob: Mob, private val plugin:
     }
 
     override fun getKey(): GoalKey<Mob> = key
-
-    override fun getTypes(): EnumSet<GoalType> = EnumSet.of(GoalType.MOVE, GoalType.LOOK)
-}
-
-/**
- * High-priority target-suppressing goal. Uses world player array tracking
- * instead of spatial chunk entities query to protect TPS.
- */
-private class PreventEnderianTargetGoal(
-    private val enderman: Enderman,
-    private val plugin: OriginsPlus
-) : Goal<Enderman> {
-
-    private val key = GoalKey.of(Enderman::class.java, NamespacedKey(plugin, "prevent_enderian_target"))
-
-    override fun shouldActivate(): Boolean {
-        val range = enderman.getAttribute(Attribute.FOLLOW_RANGE)?.value ?: 64.0
-        val rangeSq = range * range
-
-        val worldPlayers = enderman.world.players.filter {
-            it.gameMode == GameMode.SURVIVAL || it.gameMode == GameMode.ADVENTURE
-        }
-        if (worldPlayers.isEmpty()) return false
-
-        val closestPlayer = worldPlayers.minByOrNull { enderman.location.distanceSquared(it.location) } ?: return false
-
-        if (enderman.location.distanceSquared(closestPlayer.location) > rangeSq) return false
-
-        return plugin.hasOrigin(closestPlayer, "Enderian") || plugin.hasOrigin(closestPlayer, "Shulk")
-    }
-
-    override fun shouldStayActive(): Boolean = shouldActivate()
-
-    override fun start() {
-        enderman.target = null
-    }
-
-    override fun stop() {}
-
-    override fun tick() {
-        enderman.target = null
-    }
-
-    override fun getKey(): GoalKey<Enderman> = key
-
-    override fun getTypes(): EnumSet<GoalType> = EnumSet.of(GoalType.TARGET)
-}
-
-/**
- * High-priority proximity-locking goal. Claims MOVE and LOOK tokens
- * only when a protected player is within 16 blocks (256.0 squared).
- */
-private class PreventEnderianProximityGoal(
-    private val enderman: Enderman,
-    private val plugin: OriginsPlus
-) : Goal<Enderman> {
-
-    private val key = GoalKey.of(Enderman::class.java, NamespacedKey(plugin, "prevent_enderian_proximity"))
-
-    override fun shouldActivate(): Boolean {
-        val rangeSq = 256.0 // 16.0 * 16.0
-
-        val worldPlayers = enderman.world.players.filter {
-            it.gameMode == GameMode.SURVIVAL || it.gameMode == GameMode.ADVENTURE
-        }
-        if (worldPlayers.isEmpty()) return false
-
-        val closestPlayer = worldPlayers.minByOrNull { enderman.location.distanceSquared(it.location) } ?: return false
-
-        if (enderman.location.distanceSquared(closestPlayer.location) > rangeSq) return false
-
-        return plugin.hasOrigin(closestPlayer, "Enderian") || plugin.hasOrigin(closestPlayer, "Shulk")
-    }
-
-    override fun shouldStayActive(): Boolean = shouldActivate()
-
-    override fun start() {
-        resetAggression()
-    }
-
-    override fun stop() {}
-
-    override fun tick() {
-        resetAggression()
-    }
-
-    private fun resetAggression() {
-        enderman.target = null
-        enderman.setScreaming(false)
-        enderman.setHasBeenStaredAt(false)
-        enderman.pathfinder.stopPathfinding()
-    }
-
-    override fun getKey(): GoalKey<Enderman> = key
 
     override fun getTypes(): EnumSet<GoalType> = EnumSet.of(GoalType.MOVE, GoalType.LOOK)
 }
